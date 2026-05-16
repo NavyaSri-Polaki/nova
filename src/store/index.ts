@@ -277,6 +277,7 @@ function detectLanguage(path: string): string {
 // Keyed by absolute file path. Set by Editor on every doc change.
 // Read by saveTab. Cleared on closeTab when no pane holds the path.
 export const tabContentMap = new Map<string, string>();
+export const tabCursorPosMap = new Map<string, { line: number; col: number }>();
 
 // ── Autosave timers keyed by file path ───────────────────────────────────────
 const _autosaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -616,6 +617,7 @@ export const useStore = create<AppState>((set, get) => ({
         const timer = _autosaveTimers.get(tab.path);
         if (timer) { clearTimeout(timer); _autosaveTimers.delete(tab.path); }
         tabContentMap.delete(tab.path);
+        tabCursorPosMap.delete(tab.path);
       }
     }
 
