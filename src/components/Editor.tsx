@@ -4,7 +4,7 @@ import {
   highlightSpecialChars, drawSelection, dropCursor,
   rectangularSelection, crosshairCursor, highlightActiveLine,
 } from "@codemirror/view";
-import { EditorState, Extension, Compartment } from "@codemirror/state";
+import { EditorState, Extension, Compartment, EditorSelection, Text } from "@codemirror/state";
 import {
   foldGutter, syntaxHighlighting,
   defaultHighlightStyle, bracketMatching, foldKeymap, indentUnit,
@@ -16,7 +16,7 @@ import { lintKeymap } from "@codemirror/lint";
 import { getTheme } from "../theme/themes";
 import { vimLite, VimMode } from "../extensions/vimLite";
 import { indentationMarkers } from "@replit/codemirror-indentation-markers";
-import { useStore, tabContentMap, FileTab } from "../store";
+import { useStore, tabContentMap, tabCursorPosMap, FileTab } from "../store";
 import { invoke } from "@tauri-apps/api/core";
 
 // ── Compartments — one per reconfigurable axis ────────────────────────────────
@@ -69,6 +69,21 @@ function makeFontTheme(fontFamily: string, fontSize: number): Extension {
     ".cm-gutters":  { fontFamily },
     ".cm-scroller": { fontFamily },
   });
+}
+
+const cursorPositionMap = tabCursorPosMap;
+
+function clampCursorPosition(doc: Text, line: number, col: number) {
+  const lineNo = Math.max(1, Math.min(line, doc.lines));
+  const lineObj = doc.line(lineNo);
+  const validCol = Math.max(1, Math.min(col, lineObj.length + 1));
+  return { line: lineNo, col: validCol, offset: lineObj.from + validCol - 1 };
+}
+
+function restoreCursorPosition(doc: Text, path: string) {
+  const saved = cursorPositionMap.get(path);
+  if (!saved) return { line: 1, col: 1, offset: 0 };
+  return clampCursorPosition(doc, saved.line, saved.col);
 }
 
 // Static extensions — built once, shared across all views
@@ -151,63 +166,70 @@ export function Editor({ tab }: EditorProps) {
     if (!containerRef.current) return;
     let langCancelled = false;
 
-    const view = new EditorView({
-      state: EditorState.create({
-        doc: tabContentMap.get(tab.path) ?? "",
-        extensions: [
-          baseExtensions,
-          cFont.of(makeFontTheme(s.fontFamily, s.fontSize)),
-          cLang.of([]),   // async-filled below; editor is immediately usable
-          cWrap.of(s.lineWrap ? EditorView.lineWrapping : []),
-          cLineNum.of(s.relativeNumbers ? relativeLineNumbers() : lineNumbers()),
-          cIndent.of(indentUnit.of(" ".repeat(s.tabSize))),
-          cTabSize.of(EditorState.tabSize.of(s.tabSize)),
-          cBrackets.of(s.bracketMatch ? [bracketMatching(), closeBrackets()] : []),
-          cComplete.of(s.autocomplete ? autocompletion() : []),
-          cVim.of(s.vimEnabled ? vimLite((m: VimMode) => setVimModeRef.current(m)) : []),
-          cTheme.of(getTheme(s.theme)),
-          cIndentLines.of(s.indentLines ? indentationMarkers({ markerType: "fullScope", thickness: 1 }) : []),
-          EditorView.domEventHandlers({
-            keydown(e) {
-              if ((e.ctrlKey || e.metaKey) && e.key === "s") {
-                e.preventDefault();
-                saveTabRef.current(tabPathRef.current);
-              }
-              if ((e.ctrlKey || e.metaKey) && (e.key === "-" || e.key === "_")) {
-                e.preventDefault();
-                const cur = useStore.getState().settings.editor.fontSize;
-                useStore.getState().updateSettings({ editor: { fontSize: Math.max(8, cur - 1) } });
-              }
-              if ((e.ctrlKey || e.metaKey) && (e.key === "=" || e.key === "+")) {
-                e.preventDefault();
-                const cur = useStore.getState().settings.editor.fontSize;
-                useStore.getState().updateSettings({ editor: { fontSize: Math.min(32, cur + 1) } });
-              }
-            },
-          }),
-          EditorView.updateListener.of((update) => {
-            // Update cursor position on any selection or doc change
-            if (update.docChanged || update.selectionSet) {
-              const head = update.state.selection.main.head;
-              const line = update.state.doc.lineAt(head);
-              useStore.getState().setCursor(line.number, head - line.from + 1);
+    const content = tabContentMap.get(tab.path) ?? "";
+    const baseState = EditorState.create({
+      doc: content,
+      extensions: [
+        baseExtensions,
+        cFont.of(makeFontTheme(s.fontFamily, s.fontSize)),
+        cLang.of([]),   // async-filled below; editor is immediately usable
+        cWrap.of(s.lineWrap ? EditorView.lineWrapping : []),
+        cLineNum.of(s.relativeNumbers ? relativeLineNumbers() : lineNumbers()),
+        cIndent.of(indentUnit.of(" ".repeat(s.tabSize))),
+        cTabSize.of(EditorState.tabSize.of(s.tabSize)),
+        cBrackets.of(s.bracketMatch ? [bracketMatching(), closeBrackets()] : []),
+        cComplete.of(s.autocomplete ? autocompletion() : []),
+        cVim.of(s.vimEnabled ? vimLite((m: VimMode) => setVimModeRef.current(m)) : []),
+        cTheme.of(getTheme(s.theme)),
+        cIndentLines.of(s.indentLines ? indentationMarkers({ markerType: "fullScope", thickness: 1 }) : []),
+        EditorView.domEventHandlers({
+          keydown(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === "s") {
+              e.preventDefault();
+              saveTabRef.current(tabPathRef.current);
             }
-            if (!update.docChanged) return;
-            const content = update.state.doc.toString();
-            // Write to tabContentMap synchronously — always current before save fires
-            tabContentMap.set(tabPathRef.current, content);
-            markDirtyRef.current(tabPathRef.current);
-            // Push content to the standalone preview tab if open
-            if (tabLangRef.current === "markdown")
-              useStore.getState().updateMdPreviewContent(tabPathRef.current, content);
-          }),
-        ],
-      }),
+            if ((e.ctrlKey || e.metaKey) && (e.key === "-" || e.key === "_")) {
+              e.preventDefault();
+              const cur = useStore.getState().settings.editor.fontSize;
+              useStore.getState().updateSettings({ editor: { fontSize: Math.max(8, cur - 1) } });
+            }
+            if ((e.ctrlKey || e.metaKey) && (e.key === "=" || e.key === "+")) {
+              e.preventDefault();
+              const cur = useStore.getState().settings.editor.fontSize;
+              useStore.getState().updateSettings({ editor: { fontSize: Math.min(32, cur + 1) } });
+            }
+          },
+        }),
+        EditorView.updateListener.of((update) => {
+          // Update cursor position on any selection or doc change
+          if (update.docChanged || update.selectionSet) {
+            const head = update.state.selection.main.head;
+            const line = update.state.doc.lineAt(head);
+            const col = head - line.from + 1;
+            cursorPositionMap.set(tabPathRef.current, { line: line.number, col });
+            useStore.getState().setCursor(line.number, col);
+          }
+          if (!update.docChanged) return;
+          const content = update.state.doc.toString();
+          // Write to tabContentMap synchronously — always current before save fires
+          tabContentMap.set(tabPathRef.current, content);
+          markDirtyRef.current(tabPathRef.current);
+          // Push content to the standalone preview tab if open
+          if (tabLangRef.current === "markdown")
+            useStore.getState().updateMdPreviewContent(tabPathRef.current, content);
+        }),
+      ],
+    });
+
+    const restore = restoreCursorPosition(baseState.doc, tab.path);
+    const view = new EditorView({
+      state: baseState.update({ selection: EditorSelection.cursor(restore.offset) }).state,
       parent: containerRef.current,
     });
 
     view.dom.dataset.vimMode = "normal";
     viewRef.current = view;
+    useStore.getState().setCursor(restore.line, restore.col);
     view.focus();
 
     // Load language parser without blocking the editor opening

@@ -109,3 +109,7 @@ The near-term focus is LSP integration, inline git diff gutters, split pane edit
 ## License
 
 MIT
+
+## Changelog
+
+- Editor: persist cursor position per file tab when switching views — before: cursor reset to start when CodeMirror views were recreated; after: cursor restores to the last position per-file; closed tabs release stored state and invalid offsets are clamped.
